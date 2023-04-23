@@ -18,6 +18,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_AUTOMOC ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -56,6 +57,7 @@ add_library(${library_name} SHARED
 )
 
 set(dependencies
+  std_srvs
   geometry_msgs
   nav2_msgs
   nav_msgs

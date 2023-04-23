@@ -21,11 +21,14 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "std_srvs/srv/trigger.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "nav2_msgs/action/navigate_through_poses.hpp"
 #include "nav2_msgs/action/follow_waypoints.hpp"
+#include "nav2_msgs/srv/manage_lifecycle_nodes.hpp"
 #include "nav2_rviz_plugins/ros_action_qevent.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
@@ -58,6 +61,7 @@ public:
 
 private Q_SLOTS:
   void startThread();
+  void manageLifecycleManagedNodes(const unsigned char &command);
   void onStartup();
   void onShutdown();
   void onCancel();
@@ -88,6 +92,9 @@ private:
 
   // The (non-spinning) client node used to invoke the action client
   rclcpp::Node::SharedPtr client_node_;
+  rclcpp::executors::MultiThreadedExecutor::SharedPtr executor_{nullptr};
+  rclcpp::CallbackGroup::SharedPtr cg_{nullptr};
+  std::unique_ptr<std::thread> thread_;
 
   // Timeout value when waiting for action servers to respnd
   std::chrono::milliseconds server_timeout_;
@@ -101,6 +108,9 @@ private:
     waypoint_follower_action_client_;
   rclcpp_action::Client<nav2_msgs::action::NavigateThroughPoses>::SharedPtr
     nav_through_poses_action_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr lifecycle_manager_navigation_is_active_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr lifecycle_manager_localization_is_active_client_;
+  rclcpp::Client<nav2_msgs::srv::ManageLifecycleNodes>::SharedPtr lifecycle_manager_navigation_manage_nodes_client_;
 
   // Navigation action feedback subscribers
   rclcpp::Subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>::SharedPtr
@@ -186,13 +196,57 @@ class InitialThread : public QThread
   Q_OBJECT
 
 public:
-  explicit InitialThread()
-  {}
+  explicit InitialThread(
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_loc,
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_nav
+  )
+  : client_loc_(std::move(client_loc)), client_nav_(std::move(client_nav))
+  {
+    request_ = std::make_shared<std_srvs::srv::Trigger::Request>();
+    rater_ = std::make_shared<rclcpp::WallRate>(10);
+  }
 
   void run() override
   {
-    emit navigationActive();
-    emit localizationActive();
+
+    while (rclcpp::ok()) {
+      rater_->sleep();
+      if (!client_loc_->wait_for_service(std::chrono::seconds(1))) {
+        emit localizationInactive();
+      }
+      else {
+        auto fut = client_loc_->async_send_request(request_);
+        if (fut.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+          if (fut.future.get()->success) {
+            emit localizationActive();
+          }
+          else {
+            emit localizationInactive();
+          }
+        }
+        else {
+          emit localizationInactive();
+        }
+      }
+
+      if (!client_nav_->wait_for_service(std::chrono::seconds(1))) {
+        emit navigationInactive();
+      }
+      else {
+        auto fut = client_nav_->async_send_request(request_);
+        if (fut.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+          if (fut.future.get()->success) {
+            emit navigationActive();
+          }
+          else {
+            emit navigationInactive();
+          }
+        }
+        else {
+          emit navigationInactive();
+        }
+      }
+    }
   }
 
 signals:
@@ -200,6 +254,12 @@ signals:
   void navigationInactive();
   void localizationActive();
   void localizationInactive();
+
+private:
+  std::shared_ptr<std_srvs::srv::Trigger::Request> request_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_loc_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_nav_;
+  rclcpp::WallRate::SharedPtr rater_;
 };
 
 }  // namespace nav2_rviz_plugins

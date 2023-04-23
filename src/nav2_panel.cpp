@@ -288,7 +288,34 @@ Nav2Panel::Nav2Panel(QWidget * parent)
     {"--ros-args --remap __node:=navigation_dialog_action_client"});
   client_node_ = std::make_shared<rclcpp::Node>("_", options);
 
-  initial_thread_ = new InitialThread();
+  cg_ = client_node_->get_node_base_interface()->create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive,
+      false);
+  lifecycle_manager_localization_is_active_client_ = rclcpp::create_client<std_srvs::srv::Trigger>(
+      client_node_->get_node_base_interface(),
+      client_node_->get_node_graph_interface(),
+      client_node_->get_node_services_interface(),
+      "/lifecycle_manager_localization/is_active",
+      rmw_qos_profile_services_default,
+      cg_
+  );
+  lifecycle_manager_navigation_is_active_client_ = rclcpp::create_client<std_srvs::srv::Trigger>(
+      client_node_->get_node_base_interface(),
+      client_node_->get_node_graph_interface(),
+      client_node_->get_node_services_interface(),
+      "/lifecycle_manager_navigation/is_active",
+      rmw_qos_profile_services_default,
+      cg_
+  );
+  lifecycle_manager_navigation_manage_nodes_client_ = rclcpp::create_client<nav2_msgs::srv::ManageLifecycleNodes>(
+      client_node_->get_node_base_interface(),
+      client_node_->get_node_graph_interface(),
+      client_node_->get_node_services_interface(),
+      "/lifecycle_manager_navigation/manage_nodes",
+      rmw_qos_profile_services_default,
+      cg_
+  );
+  initial_thread_ = new InitialThread(lifecycle_manager_localization_is_active_client_, lifecycle_manager_navigation_is_active_client_);
   connect(initial_thread_, &InitialThread::finished, initial_thread_, &QObject::deleteLater);
 
   QSignalTransition * activeSignal = new QSignalTransition(
@@ -360,15 +387,18 @@ Nav2Panel::Nav2Panel(QWidget * parent)
   navigation_action_client_ =
     rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
     client_node_,
-    "navigate_to_pose");
+    "navigate_to_pose",
+    cg_);
   waypoint_follower_action_client_ =
     rclcpp_action::create_client<nav2_msgs::action::FollowWaypoints>(
     client_node_,
-    "follow_waypoints");
+    "follow_waypoints",
+    cg_);
   nav_through_poses_action_client_ =
     rclcpp_action::create_client<nav2_msgs::action::NavigateThroughPoses>(
     client_node_,
-    "navigate_through_poses");
+    "navigate_through_poses",
+    cg_);
   navigation_goal_ = nav2_msgs::action::NavigateToPose::Goal();
   waypoint_follower_goal_ = nav2_msgs::action::FollowWaypoints::Goal();
   nav_through_poses_goal_ = nav2_msgs::action::NavigateThroughPoses::Goal();
@@ -381,6 +411,9 @@ Nav2Panel::Nav2Panel(QWidget * parent)
   QObject::connect(
     &GoalUpdater, SIGNAL(updateGoal(double,double,double,QString)),                 // NOLINT
     this, SLOT(onNewGoal(double,double,double,QString)));  // NOLINT
+  executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+  executor_->add_callback_group(cg_, client_node_->get_node_base_interface());
+  thread_ = std::make_unique<std::thread>([&]() {executor_->spin();});
 }
 
 Nav2Panel::~Nav2Panel()
@@ -439,13 +472,21 @@ Nav2Panel::startThread()
 }
 
 void
+Nav2Panel::manageLifecycleManagedNodes(const unsigned char &command)
+{
+  nav2_msgs::srv::ManageLifecycleNodes::Request::SharedPtr request = std::make_shared<nav2_msgs::srv::ManageLifecycleNodes::Request>();
+  request->command = command;
+  lifecycle_manager_navigation_manage_nodes_client_->async_send_request(request);
+}
+
+void
 Nav2Panel::onPause()
 {
   QFuture<void> futureNav =
     QtConcurrent::run(
     std::bind(
-      &Nav2Panel::logPressedButton,
-      this));
+      &Nav2Panel::manageLifecycleManagedNodes,
+      this, std::placeholders::_1), nav2_msgs::srv::ManageLifecycleNodes::Request::PAUSE);
 }
 
 void
@@ -454,8 +495,8 @@ Nav2Panel::onResume()
   QFuture<void> futureNav =
     QtConcurrent::run(
     std::bind(
-      &Nav2Panel::logPressedButton,
-      this));
+      &Nav2Panel::manageLifecycleManagedNodes,
+      this, std::placeholders::_1), nav2_msgs::srv::ManageLifecycleNodes::Request::RESUME);
 }
 
 void
@@ -464,8 +505,8 @@ Nav2Panel::onStartup()
   QFuture<void> futureNav =
     QtConcurrent::run(
     std::bind(
-      &Nav2Panel::logPressedButton,
-      this));
+      &Nav2Panel::manageLifecycleManagedNodes,
+      this, std::placeholders::_1), nav2_msgs::srv::ManageLifecycleNodes::Request::STARTUP);
 }
 
 void
@@ -474,8 +515,8 @@ Nav2Panel::onShutdown()
   QFuture<void> futureNav =
     QtConcurrent::run(
     std::bind(
-      &Nav2Panel::logPressedButton,
-      this));
+      &Nav2Panel::manageLifecycleManagedNodes,
+      this, std::placeholders::_1), nav2_msgs::srv::ManageLifecycleNodes::Request::SHUTDOWN);
   timer_.stop();
 }
 
